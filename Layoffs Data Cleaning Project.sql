@@ -1,45 +1,41 @@
--- Switch to the 'world_layoffs' database.
+-- Use the world_layoffs database
 USE world_layoffs;
 
--- Select all records from the 'layoffs' table.
-SELECT * 
+-- View all records in the layoffs table
+SELECT *
 FROM layoffs;
 
--- Create a new table 'layoffs_staging' with the same structure as the 'layoffs' table.
+-- 1. Remove Duplicates
+-- 2. Standardize the Data
+-- 3. Handle Null or Blank Values
+-- 4. Remove Unnecessary Columns
+
+-- Create a staging table with the same structure as the layoffs table
 CREATE TABLE layoffs_staging
 LIKE layoffs;
 
--- Select all records from 'layoffs_staging' to verify its structure and content.
-SELECT * 
-FROM layoffs_staging;
+-- Insert all records from the layoffs table into the staging table
+INSERT INTO layoffs_staging
+SELECT * FROM layoffs;
 
--- Insert all records from 'layoffs' into 'layoffs_staging'.
-INSERT layoffs_staging
-SELECT * 
-FROM layoffs;
-
--- Common Table Expression (CTE) to identify duplicate records in 'layoffs_staging'.
+-- Check for duplicate records using a CTE
 WITH duplicate_cte AS
 (
-    -- Select all columns and add a row number for each duplicate record within the same partition.
-	SELECT *,
-	ROW_NUMBER() OVER(
-	PARTITION BY company, location, industry, total_laid_off,
-	percentage_laid_off, `date`, stage, country, funds_raised_millions
-	) AS row_num	
-	FROM layoffs_staging
+    SELECT *, ROW_NUMBER() OVER(
+        PARTITION BY company, location, industry, total_laid_off, percentage_laid_off,
+        date, stage, country, funds_raised_millions) AS row_num
+    FROM layoffs_staging
 )
--- Select records from the CTE where the row number is greater than 1 (indicating duplicates).
-SELECT *
-FROM duplicate_cte
+SELECT * 
+FROM duplicate_cte 
 WHERE row_num > 1;
 
--- Select records from 'layoffs_staging' where the company is 'Casper'.
-SELECT * 
+-- View records where the company is 'Casper'
+SELECT *
 FROM layoffs_staging
 WHERE company = 'Casper';
 
--- Create a new table 'layoffs_staging2' with an additional 'row_num' column to store row numbers.
+-- Create another staging table with an additional column for row number
 CREATE TABLE `layoffs_staging2` (
   `company` text,
   `location` text,
@@ -53,71 +49,130 @@ CREATE TABLE `layoffs_staging2` (
   `row_num` INT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
--- Insert all records from 'layoffs_staging' into 'layoffs_staging2', adding row numbers for duplicates.
+-- Insert records into the new staging table with row numbers for duplicates
 INSERT INTO layoffs_staging2
-SELECT *,
-	ROW_NUMBER() OVER(
-	PARTITION BY company, location, industry, total_laid_off,
-	percentage_laid_off, `date`, stage, country, funds_raised_millions
-	) AS row_num	
+SELECT *, ROW_NUMBER() OVER(
+    PARTITION BY company, location, industry, total_laid_off, percentage_laid_off,
+    date, stage, country, funds_raised_millions) AS row_num
 FROM layoffs_staging;
 
--- Select records from 'layoffs_staging2' where the row number is greater than 1 (indicating duplicates).
-SELECT *
+-- Select records with duplicates
+SELECT * 
 FROM layoffs_staging2
 WHERE row_num > 1;
 
--- Disable safe updates mode to allow updates to all records.
+-- Disable safe updates to allow deletion
 SET SQL_SAFE_UPDATES = 0;
 
--- Delete duplicate records from 'layoffs_staging2' where the row number is greater than 1.
+-- Delete duplicate records
 DELETE FROM layoffs_staging2
 WHERE row_num > 1;
 
--- Standardize data by trimming whitespace from the 'company' column in 'layoffs_staging2'.
+-- Enable safe updates again
+SET SQL_SAFE_UPDATES = 1;
+
+-- Standardize data
+
+-- Trim whitespace from company names
 UPDATE layoffs_staging2
 SET company = TRIM(company);
 
-SELECT * 
-FROM layoffs_staging2
-WHERE industry LIKE 'Crypto%';
-
+-- Update industry names that start with 'Crypto' to 'Crypto'
 UPDATE layoffs_staging2
 SET industry = 'Crypto'
 WHERE industry LIKE 'Crypto%';
 
-SELECT DISTINCT country
-FROM layoffs_staging2
-ORDER BY 1;
-
-SELECT DISTINCT country, TRIM(TRAILING '.' FROM country)
-FROM layoffs_staging2
-ORDER BY 1;
-
+-- Trim trailing periods from country names
 UPDATE layoffs_staging2
 SET country = TRIM(TRAILING '.' FROM country)
-WHERE country LIKE 'United States%';
+WHERE country LIKE 'United States.';
+
+-- Convert date column to date type
+UPDATE layoffs_staging2
+SET `date` = STR_TO_DATE(`date`, '%m/%d/%Y');
+
+ALTER TABLE layoffs_staging2
+MODIFY COLUMN `date` DATE;
+
+-- Handle Null or Blank Values
+
+-- Set industry to NULL where it is blank
+UPDATE layoffs_staging2
+SET industry = NULL
+WHERE industry = '';
+
+-- Update NULL industries with non-null values from the same company
+UPDATE layoffs_staging2 t1
+INNER JOIN layoffs_staging2 t2
+ON t1.company = t2.company
+SET t1.industry = t2.industry
+WHERE t1.industry IS NULL
+AND t2.industry IS NOT NULL;
+
+-- Remove records with both total_laid_off and percentage_laid_off as NULL
+DELETE 
+FROM layoffs_staging2
+WHERE total_laid_off IS NULL
+AND percentage_laid_off IS NULL;
+
+-- Remove the row_num column as it is no longer needed
+ALTER TABLE layoffs_staging2
+DROP COLUMN row_num;
+
+-- Convert all text columns to lowercase
+
+-- Disable safe updates to allow deletion
+SET SQL_SAFE_UPDATES = 0;
+
+UPDATE layoffs_staging2
+SET 
+	company = LOWER(company),
+    location = LOWER(location),
+    industry = LOWER(industry),
+    stage = LOWER(stage),
+    country = LOWER(country);
 
 
+-- Remove common domain extensions from company names
+UPDATE layoffs_staging2
+SET company = REPLACE(company, '.com', '');
+    
+UPDATE layoffs_staging2
+SET company = REPLACE(company, '.au', '');
 
+UPDATE layoffs_staging2
+SET company = REPLACE(company, '.co', '');
 
+UPDATE layoffs_staging2
+SET company = REPLACE(company, '.fun', '');
 
+UPDATE layoffs_staging2
+SET company = REPLACE(company, '&', '');
+    
+UPDATE layoffs_staging2
+SET company = REPLACE(company, '.ai', '');
 
+UPDATE layoffs_staging2
+SET company = REPLACE(company, '.org', '');
 
--- Re-enable safe updates mode.
+-- Check for invalid dates (e.g., future dates)
+SELECT *
+FROM layoffs_staging2
+WHERE `date` > CURDATE();
+
+-- Select rows where percentage_laid_off contains non-numeric characters
+SELECT *
+FROM layoffs_staging2
+WHERE percentage_laid_off REGEXP '[^0-9.]';
+
+ALTER TABLE layoffs_staging2
+MODIFY COLUMN percentage_laid_off DECIMAL(5, 4);
+
+-- Enable safe updates again
 SET SQL_SAFE_UPDATES = 1;
-
-
-
-
-
-
-
-
-
-
-
-
+    
+    
+    
 
 
 
